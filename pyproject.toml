@@ -1,0 +1,23 @@
+[project]
+name = "memoryp"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "chromadb==0.4.24",
+    "features>=0.5.12",
+    "flagembedding>=1.2.9",
+    "flask>=2.0.0,<3.0.0",
+    "newer>=1.0.0",
+    "numpy>=1.26.4,<2.0",
+    "onnxruntime==1.18.1",
+    "openai>=2.21.0",
+    "python-dotenv>=0.19.0,<2.0.0",
+    "qwen>=0.1.1",
+    "regex>=2022.1.18",
+    "required>=0.4.0",
+    "sentence-transformers>=5.2.3",
+    "transformers>=4.51.0",
+    "typing-extensions>=4.0.0,<5.0.0",
+]
