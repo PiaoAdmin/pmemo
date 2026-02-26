@@ -1,0 +1,51 @@
+{
+  "mid_term_sessions": {},
+  "access_frequency": {},
+  "heap_state": [],
+  "short_term_memory": [
+    {
+      "user_id": "conv-26",
+      "user_input": "Hey Mel! Good to see you! How have you been?",
+      "agent_response": "Hey Caroline! Good to see you! I'm swamped with the kids & work. What's up with you? Anything new?",
+      "timestamp": "1:56 pm on 8 May, 2023",
+      "step": 1,
+      "status": "active",
+      "version": "v1"
+    },
+    {
+      "user_id": "conv-26",
+      "user_input": "When did Caroline go to the LGBTQ support group?",
+      "agent_response": "Sorry Caroline, I don't recall you mentioning attending recently. Want to tell me about it? (Time: 1:57 pm on 8 May, 2023)",
+      "timestamp": "2026-02-26 11:04:06",
+      "step": 2,
+      "status": "active",
+      "version": "v1"
+    }
+  ],
+  "short_term_deleted_index": {},
+  "user_profiles": {},
+  "update_times": {},
+  "global_step": 2,
+  "memory_events": [
+    {
+      "event_id": "evt_5efa4245",
+      "timestamp": "2026-02-26 11:04:06",
+      "step": 1,
+      "action": "add",
+      "memory_type": "short_term",
+      "memory_id": "qa_1",
+      "detail": {}
+    },
+    {
+      "event_id": "evt_080d730f",
+      "timestamp": "2026-02-26 11:04:06",
+      "step": 2,
+      "action": "add",
+      "memory_type": "short_term",
+      "memory_id": "qa_2",
+      "detail": {}
+    }
+  ],
+  "key_memories": {},
+  "long_term_summaries": {}
+}

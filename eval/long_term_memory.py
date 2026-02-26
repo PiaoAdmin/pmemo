@@ -1,6 +1,12 @@
 import json
 import numpy as np
 from utils import get_timestamp, get_embedding, normalize_vector
+try:
+    from faiss import IndexFlatIP  # Optional acceleration
+    FAISS_AVAILABLE = True
+except ImportError:
+    IndexFlatIP = None
+    FAISS_AVAILABLE = False
 
 class LongTermMemory:
     def __init__(self, file_path="long_term.json"):
@@ -8,6 +14,7 @@ class LongTermMemory:
         self.user_profiles = {}
         self.knowledge_base = []
         self.assistant_knowledge = []
+        self._faiss_warned = False
         self.load()
 
     def update_user_profile(self, user_id, new_data, merge=False):
@@ -94,14 +101,28 @@ class LongTermMemory:
         embeddings = np.array(embeddings, dtype=np.float32)
         if embeddings.ndim == 1:
             embeddings = embeddings.reshape(1, -1)
-        from faiss import IndexFlatIP
-        dim = embeddings.shape[1]
-        index = IndexFlatIP(dim)
-        index.add(embeddings)
-        query_arr = np.array([query_vec], dtype=np.float32)
-        distances, indices = index.search(query_arr, top_k)
+
+        query_vec = np.array(query_vec, dtype=np.float32)
+        if FAISS_AVAILABLE:
+            dim = embeddings.shape[1]
+            index = IndexFlatIP(dim)
+            index.add(embeddings)
+            query_arr = np.array([query_vec], dtype=np.float32)
+            distances, indices = index.search(query_arr, min(top_k, len(self.knowledge_base)))
+            top_scores = distances[0]
+            top_indices = indices[0]
+        else:
+            if not self._faiss_warned:
+                print("长期记忆：faiss 未安装，自动使用 numpy 检索（速度较慢）。")
+                self._faiss_warned = True
+            scores = embeddings @ query_vec
+            k = min(top_k, len(scores))
+            order = np.argsort(scores)[::-1][:k]
+            top_scores = scores[order]
+            top_indices = order
+
         results = []
-        for dist, idx in zip(distances[0], indices[0]):
+        for dist, idx in zip(top_scores, top_indices):
             if idx == -1:
                 continue
             if dist >= threshold:

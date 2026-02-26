@@ -1,7 +1,12 @@
 import json
 import numpy as np
 from collections import defaultdict
-import faiss
+try:
+    import faiss  # Optional acceleration
+    FAISS_AVAILABLE = True
+except ImportError:
+    faiss = None
+    FAISS_AVAILABLE = False
 import heapq
 from utils import get_timestamp, generate_id, get_embedding, normalize_vector, llm_extract_keywords, compute_time_decay
 from datetime import datetime
@@ -41,6 +46,7 @@ class MidTermMemory:
         self.sessions = {}
         self.access_frequency = defaultdict(int)
         self.heap = []
+        self._faiss_warned = False
         self.load()
 
     def get_page_by_id(self, page_id):
@@ -195,20 +201,35 @@ class MidTermMemory:
         
         session_ids = list(self.sessions.keys())
         embeddings = np.array([self.sessions[s]["summary_embedding"] for s in session_ids], dtype=np.float32)
-        dim = embeddings.shape[1]
-        index = faiss.IndexFlatIP(dim)
-        index.add(embeddings)
         
         query_vec = get_embedding(query)
         query_vec = normalize_vector(query_vec)
-        query_arr = np.array([query_vec], dtype=np.float32)
-        distances, indices = index.search(query_arr, top_k)
+        query_vec = np.array(query_vec, dtype=np.float32)
+
+        # Key fix: make FAISS optional so evaluation can run without faiss package.
+        if FAISS_AVAILABLE:
+            dim = embeddings.shape[1]
+            index = faiss.IndexFlatIP(dim)
+            index.add(embeddings)
+            query_arr = np.array([query_vec], dtype=np.float32)
+            distances, indices = index.search(query_arr, min(top_k, len(session_ids)))
+            top_scores = distances[0]
+            top_indices = indices[0]
+        else:
+            if not self._faiss_warned:
+                print("中期记忆：faiss 未安装，自动使用 numpy 检索（速度较慢）。")
+                self._faiss_warned = True
+            scores = embeddings @ query_vec
+            k = min(top_k, len(scores))
+            order = np.argsort(scores)[::-1][:k]
+            top_scores = scores[order]
+            top_indices = order
         
         query_keywords = llm_extract_keywords(query, client)
         current_time = datetime.now()
         results = []
         
-        for dist, idx in zip(distances[0], indices[0]):
+        for dist, idx in zip(top_scores, top_indices):
             if idx == -1:
                 continue
             

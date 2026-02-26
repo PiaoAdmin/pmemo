@@ -39,13 +39,20 @@ class ShortTermMemory:
         return None
 
     # Key user operation: delete a specific short-term memory by dialogue step.
-    def delete_by_step(self, step: int) -> bool:
-        deleted = self.storage.delete_short_term_memory_by_step(step)
+    def delete_by_step(self, step: int, soft: bool = True) -> bool:
+        deleted = self.storage.delete_short_term_memory_by_step(step, soft=soft)
         if deleted:
             # Reload deque to keep runtime cache strictly aligned with metadata.
             self.memory = self.storage.get_short_term_memory(self.max_capacity)
             print(f"ShortTermMemory: Deleted QA at step={step}.")
         return deleted
+
+    def restore_by_step(self, step: int) -> bool:
+        restored = self.storage.restore_short_term_memory_by_step(step)
+        if restored:
+            self.memory = self.storage.get_short_term_memory(self.max_capacity)
+            print(f"ShortTermMemory: Restored QA at step={step}.")
+        return restored
 
     def load(self):
         try:

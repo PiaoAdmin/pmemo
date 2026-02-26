@@ -70,6 +70,7 @@ class ChromaStorageProvider:
             "access_frequency": {},
             "heap_state": [],
             "short_term_memory": [],
+            "short_term_deleted_index": {},
             "user_profiles": {},
             "update_times": {},
             "global_step": 0,
@@ -84,6 +85,7 @@ class ChromaStorageProvider:
             "access_frequency": {},
             "heap_state": [],
             "short_term_memory": [],
+            "short_term_deleted_index": {},
             "user_profiles": {},
             "update_times": {},
             "global_step": 0,
@@ -142,21 +144,45 @@ class ChromaStorageProvider:
         self.metadata.setdefault("short_term_memory", []).append(qa_pair)
         
     def get_short_term_memory(self, max_capacity: int) -> deque:
-        return deque(self.metadata.get("short_term_memory", []), maxlen=max_capacity)
+        # Only active items should participate in runtime context assembly.
+        active_items = [x for x in self.metadata.get("short_term_memory", []) if x.get("status", "active") == "active"]
+        return deque(active_items, maxlen=max_capacity)
     
     def pop_oldest_short_term(self) -> Optional[dict]:
         memory_list = self.metadata.get("short_term_memory", [])
-        return memory_list.pop(0) if memory_list else None
+        for idx, item in enumerate(memory_list):
+            if item.get("status", "active") == "active":
+                return memory_list.pop(idx)
+        return None
     
     def is_short_term_full(self, max_capacity: int) -> bool:
-        return len(self.metadata.get("short_term_memory", [])) >= max_capacity
+        active_count = sum(1 for x in self.metadata.get("short_term_memory", []) if x.get("status", "active") == "active")
+        return active_count >= max_capacity
 
     # Key user operation: manual delete from STM by step id.
-    def delete_short_term_memory_by_step(self, step: int) -> bool:
+    def delete_short_term_memory_by_step(self, step: int, soft: bool = True) -> bool:
         memory_list = self.metadata.get("short_term_memory", [])
         for idx, item in enumerate(memory_list):
             if item.get("step") == step:
-                memory_list.pop(idx)
+                if soft:
+                    item["status"] = "deleted"
+                    item["deleted_at"] = get_timestamp()
+                    self.metadata.setdefault("short_term_deleted_index", {})[str(step)] = item
+                    memory_list[idx] = item
+                else:
+                    memory_list.pop(idx)
+                    self.metadata.setdefault("short_term_deleted_index", {}).pop(str(step), None)
+                return True
+        return False
+
+    def restore_short_term_memory_by_step(self, step: int) -> bool:
+        memory_list = self.metadata.get("short_term_memory", [])
+        for idx, item in enumerate(memory_list):
+            if item.get("step") == step and item.get("status") == "deleted":
+                item["status"] = "active"
+                item["restored_at"] = get_timestamp()
+                memory_list[idx] = item
+                self.metadata.setdefault("short_term_deleted_index", {}).pop(str(step), None)
                 return True
         return False
 
@@ -227,6 +253,17 @@ class ChromaStorageProvider:
             )
         
         if pages:
+            # Keep Chroma page index aligned with metadata backup.
+            # This prevents stale pages from surviving after session compression.
+            try:
+                self.mid_term_collection.delete(where={"$and": [
+                    {"type": {"$eq": "page"}},
+                    {"session_id": {"$eq": session_id}},
+                    {"user_id": {"$eq": self.user_id}}
+                ]})
+            except Exception as e:
+                print(f"ChromaStorageProvider: Error clearing old pages for session {session_id}: {e}")
+
             # First, filter pages to only include those with embeddings.
             pages_with_embeddings = [p for p in pages if "page_embedding" in p and p["page_embedding"]]
 
@@ -260,7 +297,7 @@ class ChromaStorageProvider:
                     metadata = results['metadatas'][0][i]
                     session_id = metadata['session_id']
                     session_meta = self.metadata.get("mid_term_sessions", {}).get(session_id)
-                    if session_meta:
+                    if session_meta and session_meta.get("status", "active") == "active":
                         sessions.append({
                             "session_id": session_id,
                             "session_summary": metadata['summary'],
@@ -310,15 +347,32 @@ class ChromaStorageProvider:
         if session_id in self.metadata.get("mid_term_sessions", {}):
             self.metadata["mid_term_sessions"][session_id].update(updates)
 
-    def delete_mid_term_session(self, session_id: str):
-        if session_id in self.metadata.get("mid_term_sessions", {}):
-            del self.metadata["mid_term_sessions"][session_id]
+    def delete_mid_term_session(self, session_id: str, soft: bool = True):
+        sessions = self.metadata.get("mid_term_sessions", {})
+        if session_id not in sessions:
+            return False
+
+        if soft:
+            sessions[session_id]["status"] = "deleted"
+            sessions[session_id]["deleted_at"] = get_timestamp()
+            return True
+
+        del sessions[session_id]
         if session_id in self.metadata.get("access_frequency", {}):
             del self.metadata["access_frequency"][session_id]
         try:
             self.mid_term_collection.delete(where={"session_id": session_id})
         except Exception as e:
             print(f"ChromaStorageProvider: Error deleting session {session_id} from ChromaDB: {e}")
+        return True
+
+    def restore_mid_term_session(self, session_id: str) -> bool:
+        sessions = self.metadata.get("mid_term_sessions", {})
+        if session_id not in sessions:
+            return False
+        sessions[session_id]["status"] = "active"
+        sessions[session_id]["restored_at"] = get_timestamp()
+        return True
 
     def get_page_by_id(self, page_id: str) -> Optional[dict]:
         try:

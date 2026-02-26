@@ -1,7 +1,7 @@
 import os
 import json
 import atexit
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor
 
 # 修改为绝对导入
 try:
@@ -39,6 +39,8 @@ class Memoryos:
                  assistant_id: str = DEFAULT_ASSISTANT_ID, 
                  short_term_capacity=10,
                  mid_term_capacity=2000,
+                 mid_term_page_merge_threshold=60,
+                 mid_term_page_merge_keep_tail=20,
                  long_term_knowledge_capacity=100,
                  retrieval_queue_capacity=7,
                  mid_term_heat_threshold=H_PROFILE_UPDATE_THRESHOLD,
@@ -104,6 +106,8 @@ class Memoryos:
             user_id=self.user_id,
             client=self.client, 
             max_capacity=mid_term_capacity,
+            page_merge_threshold=mid_term_page_merge_threshold,
+            page_merge_keep_tail=mid_term_page_merge_keep_tail,
             embedding_model_name=self.embedding_model_name,
             embedding_model_kwargs=self.embedding_model_kwargs,
             llm_model=self.llm_model,
@@ -244,7 +248,7 @@ class Memoryos:
                 
                 # Update the session metadata in storage
                 session["N_visit"] = 0 
-                session["L_interaction"] = 0
+                # Keep L_interaction intact; it represents segment size, not analysis state.
                 session["H_segment"] = compute_segment_heat(session)
                 session["last_visit_time"] = get_timestamp()
                 self.mid_term_memory.storage.update_mid_term_session_metadata(sid, session)
@@ -260,9 +264,10 @@ class Memoryos:
     def _rollup_long_term_summary(self, updater_result: dict):
         if not updater_result:
             return
-        text = updater_result.get("input_text_for_summary", "").strip()
-        step_start = updater_result.get("step_start")
-        step_end = updater_result.get("step_end")
+        # Prefer queue-window rollup (same length as STM capacity) when provided.
+        text = updater_result.get("long_term_rollup_text", "").strip() or updater_result.get("input_text_for_summary", "").strip()
+        step_start = updater_result.get("long_term_step_start", updater_result.get("step_start"))
+        step_end = updater_result.get("long_term_step_end", updater_result.get("step_end"))
         if not text or step_start is None or step_end is None:
             return
         self.user_long_term_memory.add_summary_segment(
@@ -318,6 +323,7 @@ class Memoryos:
         if self.short_term_memory.is_full():
             print("Memoryos: Short-term memory full. Processing to mid-term.")
             updater_result = self.updater.process_short_term_to_mid_term()
+            # Execute sequentially to avoid concurrent writes to shared metadata state.
             self._rollup_long_term_summary(updater_result)
             self._auto_promote_key_memory()
         
@@ -370,25 +376,24 @@ class Memoryos:
         long_term_text = "【长期记忆】\n" + ("\n".join(ltm_lines) if ltm_lines else "- None")
 
         # 5. Format retrieved mid-term pages with dialogue chain info
-        retrieval_text_parts = []
-        for p in retrieved_pages:
-            # 获取页面的完整信息，包括meta_info
-            page_id = p.get('page_id', '')
-            session_id = p.get('session_id', '')
-            
-            # 从JSON备份中获取meta_info
+        def _build_mid_term_page_text(page):
+            page_id = page.get("page_id", "")
+            session_id = page.get("session_id", "")
             meta_info = ""
             if page_id and session_id:
                 full_page_info = self.storage_provider.get_page_full_info(page_id, session_id)
                 if full_page_info:
-                    meta_info = full_page_info.get('meta_info', '')
-            
-            # 构建包含对话链信息的文本
-            page_text = f"User: {p.get('user_input', '')}\nAssistant: {p.get('agent_response', '')}"
+                    meta_info = full_page_info.get("meta_info", "")
+            page_text = f"User: {page.get('user_input', '')}\nAssistant: {page.get('agent_response', '')}"
             if meta_info:
                 page_text += f"\n Dialogue chain info: \n{meta_info}"
-            
-            retrieval_text_parts.append(page_text)
+            return page_text
+
+        retrieval_text_parts = []
+        if retrieved_pages:
+            # Parallelize page-text construction when many recalled pages are present.
+            with ThreadPoolExecutor(max_workers=min(8, max(1, len(retrieved_pages)))) as executor:
+                retrieval_text_parts = list(executor.map(_build_mid_term_page_text, retrieved_pages))
         retrieval_text = "【中期记忆】\n" + ("\n\n".join(retrieval_text_parts) if retrieval_text_parts else "- None")
         short_term_text = "【短期记忆】\n" + (history_text if history_text else "- None")
         ordered_memory_text = f"{key_memory_text}\n\n{long_term_text}\n\n{retrieval_text}\n\n{short_term_text}"
@@ -477,7 +482,10 @@ class Memoryos:
 
     # Convenience wrappers for manual memory management in products/tools.
     def delete_short_term_memory(self, step: int):
-        return self.delete_memory("short_term", str(step), soft=False)
+        return self.delete_memory("short_term", str(step), soft=True)
+
+    def restore_short_term_memory(self, step: int):
+        return self.restore_memory("short_term", str(step))
 
     def delete_long_term_summary(self, ltm_id: str, soft: bool = True):
         return self.delete_memory("long_term_summary", ltm_id, soft=soft)
@@ -486,17 +494,47 @@ class Memoryos:
         memory_type = "user_knowledge" if knowledge_type == "user" else "assistant_knowledge"
         return self.delete_memory(memory_type, knowledge_id, soft=False)
 
+    def delete_mid_term_by_keywords(self, keywords, soft: bool = True):
+        deleted_session_ids = self.mid_term_memory.delete_sessions_by_keywords(keywords, soft=soft)
+        for sid in deleted_session_ids:
+            self.storage_provider.record_memory_event(
+                "delete_soft" if soft else "delete_hard",
+                "mid_term_session",
+                sid,
+                detail={"keywords": keywords}
+            )
+        return deleted_session_ids
+
+    def restore_mid_term_session(self, session_id: str):
+        ok = self.mid_term_memory.restore_session(session_id)
+        if ok:
+            self.storage_provider.record_memory_event("restore", "mid_term_session", session_id)
+        return ok
+
     def delete_memory(self, memory_type: str, memory_id: str, soft: bool = True):
         # Unified delete API for UI/client calls.
         if memory_type == "short_term":
             # `memory_id` for short-term is dialogue step.
             step = int(memory_id)
-            ok = self.short_term_memory.delete_by_step(step)
+            ok = self.short_term_memory.delete_by_step(step, soft=soft)
             if ok:
-                self.storage_provider.record_memory_event("delete_hard", "short_term", f"qa_{step}")
+                self.storage_provider.record_memory_event("delete_soft" if soft else "delete_hard", "short_term", f"qa_{step}")
             return ok
         if memory_type == "key_memory":
             return self.delete_key_memory(memory_id, soft=soft)
+        if memory_type == "mid_term_session":
+            ok = self.mid_term_memory.storage.delete_mid_term_session(memory_id, soft=soft)
+            if ok:
+                if soft and memory_id in self.mid_term_memory.sessions:
+                    self.mid_term_memory.sessions[memory_id]["status"] = "deleted"
+                elif not soft:
+                    self.mid_term_memory.sessions.pop(memory_id, None)
+                    # Keep local LFU state consistent after hard delete.
+                    self.mid_term_memory.access_frequency.pop(memory_id, None)
+                self.mid_term_memory.rebuild_heap()
+                self.mid_term_memory.save()
+                self.storage_provider.record_memory_event("delete_soft" if soft else "delete_hard", memory_type, memory_id)
+            return ok
         if memory_type == "long_term":
             # Default long-term deletion target is summary segment for backward compatibility.
             memory_type = "long_term_summary"
@@ -519,9 +557,18 @@ class Memoryos:
 
     def restore_memory(self, memory_type: str, memory_id: str):
         if memory_type == "short_term":
-            raise ValueError("short_term supports hard delete only and cannot be restored")
+            step = int(memory_id)
+            ok = self.short_term_memory.restore_by_step(step)
+            if ok:
+                self.storage_provider.record_memory_event("restore", "short_term", f"qa_{step}")
+            return ok
         if memory_type == "key_memory":
             return self.restore_key_memory(memory_id)
+        if memory_type == "mid_term_session":
+            ok = self.mid_term_memory.restore_session(memory_id)
+            if ok:
+                self.storage_provider.record_memory_event("restore", memory_type, memory_id)
+            return ok
         if memory_type == "long_term":
             memory_type = "long_term_summary"
         if memory_type == "long_term_summary":

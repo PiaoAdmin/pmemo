@@ -81,6 +81,13 @@ class Updater:
         """
         Updates meta_info for a chain of connected pages starting from start_page_id.
         """
+        def _find_page_in_backup(target_page_id):
+            for sid in self.mid_term_memory.sessions.keys():
+                for p in self.mid_term_memory.storage.get_pages_from_json_backup(sid):
+                    if p.get("page_id") == target_page_id:
+                        return p
+            return None
+
         q = [start_page_id]
         visited = {start_page_id}
         
@@ -88,9 +95,15 @@ class Updater:
         while head < len(q):
             current_page_id = q[head]
             head += 1
-            page = self.mid_term_memory.get_page_by_id(current_page_id)
+            # Use pages_backup as source of truth for chain pointers/meta fields.
+            page = _find_page_in_backup(current_page_id)
             if page:
-                page["meta_info"] = new_meta_info
+                # Persist metadata to pages_backup via storage API; mutating `get_page_by_id`
+                # result is not durable because it comes from Chroma metadata snapshot.
+                self.mid_term_memory.storage.update_page_connections(
+                    current_page_id,
+                    {"meta_info": new_meta_info}
+                )
                 # Check previous page
                 prev_id = page.get("pre_page")
                 if prev_id and prev_id not in visited:
@@ -207,11 +220,22 @@ class Updater:
             self.mid_term_memory.save()
 
         step_values = [qa.get("step") for qa in evicted_qas if qa.get("step") is not None]
+
+        # Build long-term rollup window using STM capacity to keep summary granularity stable.
+        rollup_source_qas = (evicted_qas + self.short_term_memory.get_all())[-self.short_term_memory.max_capacity:]
+        rollup_steps = [qa.get("step") for qa in rollup_source_qas if qa.get("step") is not None]
+        long_term_rollup_text = "\n".join(
+            f"User: {qa.get('user_input', '')}\nAssistant: {qa.get('agent_response', '')}"
+            for qa in rollup_source_qas
+        )
         return {
             "evicted_qas": evicted_qas,
             "input_text_for_summary": input_text_for_summary,
             "step_start": min(step_values) if step_values else None,
-            "step_end": max(step_values) if step_values else None
+            "step_end": max(step_values) if step_values else None,
+            "long_term_rollup_text": long_term_rollup_text if len(rollup_source_qas) == self.short_term_memory.max_capacity else "",
+            "long_term_step_start": min(rollup_steps) if rollup_steps else None,
+            "long_term_step_end": max(rollup_steps) if rollup_steps else None
         }
 
     def update_long_term_from_analysis(self, user_id, profile_analysis_result):
@@ -223,20 +247,28 @@ class Updater:
             return
 
         new_profile_text = profile_analysis_result.get("profile")
-        if new_profile_text and new_profile_text.lower() != "none":
+        if new_profile_text and str(new_profile_text).strip().lower() != "none":
             print(f"Updater: Updating user profile for {user_id} in LongTermMemory.")
-            self.long_term_memory.update_user_profile(user_id, new_profile_text, merge=False)
+            if isinstance(new_profile_text, dict):
+                # Analysis output is already structured profile data.
+                self.long_term_memory.storage.update_user_profile(user_id, new_profile_text)
+            else:
+                # `update_user_profile` accepts (user_id, conversation_history).
+                self.long_term_memory.update_user_profile(user_id, str(new_profile_text))
         
         user_private_knowledge = profile_analysis_result.get("private")
-        if user_private_knowledge and user_private_knowledge.lower() != "none":
+        if user_private_knowledge and str(user_private_knowledge).lower() != "none":
             print(f"Updater: Adding user private knowledge for {user_id} to LongTermMemory.")
-            for line in user_private_knowledge.split('\n'):
+            lines = user_private_knowledge if isinstance(user_private_knowledge, list) else str(user_private_knowledge).split('\n')
+            for line in lines:
                 if line.strip() and line.strip().lower() not in ["none", "- none", "- none."]:
-                    self.long_term_memory.add_user_knowledge(line.strip()) 
+                    # Unified knowledge API: add_knowledge(text, knowledge_type)
+                    self.long_term_memory.add_knowledge(line.strip(), "user")
 
         assistant_knowledge_text = profile_analysis_result.get("assistant_knowledge")
-        if assistant_knowledge_text and assistant_knowledge_text.lower() != "none":
+        if assistant_knowledge_text and str(assistant_knowledge_text).lower() != "none":
             print("Updater: Adding assistant knowledge to LongTermMemory.")
-            for line in assistant_knowledge_text.split('\n'):
+            lines = assistant_knowledge_text if isinstance(assistant_knowledge_text, list) else str(assistant_knowledge_text).split('\n')
+            for line in lines:
                 if line.strip() and line.strip().lower() not in ["none", "- none", "- none."]:
-                    self.long_term_memory.add_assistant_knowledge(line.strip())
+                    self.long_term_memory.add_knowledge(line.strip(), "assistant")

@@ -282,7 +282,15 @@ def gpt_generate_multi_summary(text, client: OpenAIClient, model="gpt-4o-mini"):
     print("Calling LLM to generate multi-topic summary...")
     response_text = client.chat_completion(model=model, messages=messages)
     try:
-        summaries = json.loads(response_text)
+        cleaned = response_text.strip()
+        # Key robustness fix: many models wrap JSON in ```json ... ``` fences.
+        if cleaned.startswith("```"):
+            cleaned = cleaned.strip("`")
+            if cleaned.lower().startswith("json"):
+                cleaned = cleaned[4:].strip()
+        summaries = json.loads(cleaned)
+        if isinstance(summaries, dict):
+            summaries = [summaries]
     except json.JSONDecodeError:
         print(f"Warning: Could not parse multi-summary JSON: {response_text}")
         summaries = []

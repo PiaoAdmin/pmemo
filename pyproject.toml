@@ -18,6 +18,7 @@ dependencies = [
     "regex>=2022.1.18",
     "required>=0.4.0",
     "sentence-transformers>=5.2.3",
+    "tiktoken>=0.12.0",
     "transformers>=4.51.0",
     "typing-extensions>=4.0.0,<5.0.0",
 ]

@@ -1,5 +1,6 @@
 import json
 import numpy as np
+import re
 from collections import defaultdict
 import heapq
 from datetime import datetime
@@ -42,6 +43,8 @@ class MidTermMemory:
                  user_id: str, 
                  client: OpenAIClient, 
                  max_capacity=2000,
+                 page_merge_threshold: int = 60,
+                 page_merge_keep_tail: int = 20,
                  embedding_model_name: str = "all-MiniLM-L6-v2", 
                  embedding_model_kwargs: Optional[dict] = None,
                  llm_model: str = "gpt-4o-mini",
@@ -52,6 +55,8 @@ class MidTermMemory:
         self.storage = storage_provider
         self.llm_model = llm_model
         self.use_embedding_api = use_embedding_api  # 保存参数
+        self.page_merge_threshold = page_merge_threshold
+        self.page_merge_keep_tail = page_merge_keep_tail
         
         # Load sessions and other data from the shared storage provider's in-memory metadata
         self.sessions: dict = self.storage.get_mid_term_sessions()
@@ -74,6 +79,7 @@ class MidTermMemory:
             session.setdefault("key_promoted", False)
             session.setdefault("compressed_at", None)
             session.setdefault("summary_step_range", [])
+            session.setdefault("status", "active")
 
     def get_page_by_id(self, page_id):
         return self.storage.get_page_by_id(page_id)
@@ -88,7 +94,10 @@ class MidTermMemory:
         if not self.access_frequency or not self.sessions:
             return
         
-        lfu_sid = min(self.access_frequency, key=lambda k: self.access_frequency[k])
+        active_session_ids = [sid for sid, session in self.sessions.items() if session.get("status", "active") == "active"]
+        if not active_session_ids:
+            return
+        lfu_sid = min(active_session_ids, key=lambda k: self.access_frequency.get(k, 0))
         print(f"MidTermMemory: LFU eviction. Session {lfu_sid} has lowest access frequency.")
         
         if lfu_sid not in self.sessions:
@@ -97,7 +106,7 @@ class MidTermMemory:
             return
         
         # Remove from storage
-        self.storage.delete_mid_term_session(lfu_sid)
+        self.storage.delete_mid_term_session(lfu_sid, soft=False)
         
         # Remove from local data structures
         session_to_delete = self.sessions.pop(lfu_sid)
@@ -197,6 +206,7 @@ class MidTermMemory:
         heapq.heappush(self.heap, (-session_obj["H_segment"], session_id)) # Use negative heat for max-heap behavior
         
         print(f"MidTermMemory: Added new session {session_id}. Initial heat: {session_obj['H_segment']:.2f}.")
+        self.compress_session_if_needed(session_id, max_pages=self.page_merge_threshold, keep_tail=self.page_merge_keep_tail)
         if len(self.sessions) > self.max_capacity:
             self.evict_lfu()
         
@@ -206,6 +216,8 @@ class MidTermMemory:
     def rebuild_heap(self):
         self.heap = []
         for sid, session_data in self.sessions.items():
+            if session_data.get("status", "active") != "active":
+                continue
             # Ensure H_segment is up-to-date before rebuilding heap if necessary
             # session_data["H_segment"] = compute_segment_heat(session_data)
             heapq.heappush(self.heap, (-session_data["H_segment"], sid))
@@ -292,6 +304,7 @@ class MidTermMemory:
             
             # 5. Add the updated session and the complete list of pages to storage
             self.storage.add_mid_term_session(target_session, all_pages_for_session)
+            self.compress_session_if_needed(best_sid, max_pages=self.page_merge_threshold, keep_tail=self.page_merge_keep_tail)
             
             # Update local heap
             self.rebuild_heap()
@@ -328,6 +341,8 @@ class MidTermMemory:
                 continue
                 
             session = self.sessions[session_id]
+            if session.get("status", "active") != "active":
+                continue
             semantic_sim_score = session_result["session_relevance_score"]
 
             # Keyword similarity for session summary
@@ -437,6 +452,8 @@ class MidTermMemory:
         candidates = []
         sorted_sessions = sorted(self.sessions.values(), key=lambda x: x.get("H_segment", 0.0), reverse=True)
         for session in sorted_sessions:
+            if session.get("status", "active") != "active":
+                continue
             if session.get("key_promoted"):
                 continue
 
@@ -474,7 +491,7 @@ class MidTermMemory:
             )
             session["key_promoted"] = True
             self.storage.update_mid_term_session_metadata(sid, {"key_promoted": True})
-            self.compress_session_if_needed(sid)
+            self.compress_session_if_needed(sid, max_pages=self.page_merge_threshold, keep_tail=self.page_merge_keep_tail)
 
             if len(candidates) >= limit:
                 break
@@ -482,3 +499,59 @@ class MidTermMemory:
         if candidates:
             self.save()
         return candidates
+
+    def delete_sessions_by_keywords(self, keywords, soft: bool = True):
+        """Delete/soft-delete full mid-term sessions by keyword hit on summary fields."""
+        if not keywords:
+            return []
+
+        normalized = [k.strip().lower() for k in keywords if k and k.strip()]
+        if not normalized:
+            return []
+
+        matched = []
+        for sid, session in list(self.sessions.items()):
+            if session.get("status", "active") != "active":
+                continue
+            summary = (session.get("summary") or "").lower()
+            summary_keywords = {str(k).strip().lower() for k in session.get("summary_keywords", []) if str(k).strip()}
+            # Use token-level match to avoid accidental broad substring deletes.
+            summary_tokens = set(re.findall(r"[a-z0-9_\-\u4e00-\u9fff]+", summary))
+            hit = False
+            for kw in normalized:
+                kw_tokens = set(re.findall(r"[a-z0-9_\-\u4e00-\u9fff]+", kw))
+                if kw in summary_keywords:
+                    hit = True
+                    break
+                if kw_tokens and kw_tokens.issubset(summary_tokens):
+                    hit = True
+                    break
+            if not hit:
+                continue
+
+            ok = self.storage.delete_mid_term_session(sid, soft=soft)
+            if not ok:
+                continue
+            if soft:
+                session["status"] = "deleted"
+                session["deleted_at"] = get_timestamp()
+            else:
+                self.sessions.pop(sid, None)
+                self.access_frequency.pop(sid, None)
+            matched.append(sid)
+
+        if matched:
+            self.rebuild_heap()
+            self.save()
+        return matched
+
+    def restore_session(self, session_id: str) -> bool:
+        ok = self.storage.restore_mid_term_session(session_id)
+        if not ok:
+            return False
+        if session_id in self.sessions:
+            self.sessions[session_id]["status"] = "active"
+            self.sessions[session_id]["restored_at"] = get_timestamp()
+        self.rebuild_heap()
+        self.save()
+        return True

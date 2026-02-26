@@ -1,0 +1,15 @@
+[
+  {
+    "sample_id": "conv-26",
+    "speaker_a": "Caroline",
+    "speaker_b": "Melanie",
+    "question": "When did Caroline go to the LGBTQ support group?",
+    "system_answer": "Sorry Caroline, I don't recall you mentioning attending recently. Want to tell me about it? (Time: 1:57 pm on 8 May, 2023)",
+    "original_answer": "7 May 2023",
+    "category": 2,
+    "evidence": [
+      "D1:3"
+    ],
+    "timestamp": "2026-02-26 11:04:06"
+  }
+]
