@@ -2,7 +2,7 @@
 
 PMemo 是基于 MemoryOS 扩展的 Python 对话记忆框架。在短期、中期、长期记忆之外增加关键记忆，并提供滚动摘要块、记忆提升、删除恢复和操作事件，用于保存用户偏好、约束与历史上下文。
 
-本文对应本仓库已提交的 PMemo 0.1 实现（代码基线 `fb0c02f`），以根目录 `Memoryos` 类为入口。项目尚未提供独立 HTTP 服务或命令行聊天程序。
+本文对应本仓库已提交的 PMemo 0.1 实现，以根目录 `Memoryos` 类为入口。项目尚未提供独立 HTTP 服务或命令行聊天程序。
 
 ## 来源与扩展范围
 
@@ -48,30 +48,6 @@ PMemo 的扩展集中在以下部分，相关实现记录见 [upgrade_versions](
 - **关键记忆**来自显式写入或按命中率、命中次数、热度等规则从中期记忆提升。
 - 生成提示中的记忆顺序为：**关键记忆 → 长期摘要 → 中期页面 → 短期对话**，并结合画像及知识。
 
-## 环境与安装
-
-项目声明 Python `>=3.10`，已提交的 `.python-version` 为 `3.10`。依赖包含 ChromaDB、NumPy、OpenAI SDK、Sentence Transformers 和 Transformers；本地向量模型会引入 PyTorch 等依赖。
-
-使用 uv：
-
-```bash
-git clone https://github.com/PiaoAdmin/pmemo.git
-cd pmemo
-uv sync --python 3.10
-```
-
-`pyproject.toml` 的项目名仍为 `memoryp`，代码导入名为 `memoryos`。请在仓库根目录运行示例。
-
-也可以使用 pip：
-
-```bash
-python3.10 -m venv .venv
-source .venv/bin/activate
-python -m pip install --upgrade pip
-python -m pip install -r requirements.txt 'numpy>=1.26.4,<2.0'
-```
-
-已提交版本使用 `chromadb==0.4.24`；pip 命令额外约束 NumPy `<2.0`，与 `pyproject.toml` 保持一致。
 
 ## 快速开始
 
@@ -122,9 +98,7 @@ finally:
 
 ### 本地 embedding
 
-将构造参数改为 `embedding_model_name="all-MiniLM-L6-v2"`、`use_embedding_api=False` 即可使用本地模型，也可指定本地模型目录。首次使用通常需要下载模型。生成和部分记忆更新仍使用 LLM API。
-
-切换向量模型或维度时应使用新的数据目录，避免与旧向量混用。已提交版本的远程 embedding 复用 `openai_api_key` 和 `openai_base_url`，构造器没有独立的 `embedding_api_key` / `embedding_base_url` 参数。
+将构造参数改为 `embedding_model_name="all-MiniLM-L6-v2"`、`use_embedding_api=False` 即可使用本地模型，也可指定本地模型目录。
 
 ## 常用构造参数
 
@@ -150,9 +124,6 @@ finally:
 | `key_promotion_min_hits` | `8` | 自动提升最少命中次数 |
 | `key_promotion_heat` | `6.0` | 自动提升热度阈值 |
 
-构造器还保留 `long_term_knowledge_capacity=100`，但当前初始化路径未将它接入知识容量限制，不应依赖其自动淘汰知识。建议使用关键字参数。
-
-环境变量由示例和测试/评测脚本读取；直接创建 `Memoryos` 时需自行读取并传参。
 
 ## API 与删除语义
 
@@ -181,8 +152,6 @@ finally:
 | `assistant_knowledge` | 知识 ID | 仅物理删除，不支持恢复 |
 
 前四类传入 `soft=False` 会物理删除，不能恢复。知识项即使传入 `soft=True` 仍物理删除。软删除通过状态过滤影响后续读取/检索，不等于从磁盘擦除。
-
-删除原始记忆不会自动级联清理已派生的摘要、画像、知识或关键记忆。需要彻底移除信息时，应检查派生内容。
 
 可通过 `memory.key_term_memory.list_key_memory()` 查看关键记忆，通过 `memory.short_term_memory.get_all()` 查看短期对话及 step。更底层的会话、知识与摘要接口见对应模块。
 
@@ -221,77 +190,9 @@ uv run python comprehensive_test.py
 
 测试会调用真实 API 并写入数据，覆盖记忆写入/召回、中期合并、滚动窗口及部分删除恢复流程。包含依赖生成内容的语义检查，结果可能随模型波动，并非离线单元测试。可通过 `MEMORYOS_TEST_USER_ID`、`MEMORYOS_TEST_ASSISTANT_ID` 指定标识。
 
-现有测试和评测配置含历史硬编码 API key 回退值。运行前请显式设置自己的 `OPENAI_API_KEY`，勿依赖或复制历史值。
-
 ### LoCoMo
 
 - `eval/locomo10.json`：评测数据。
 - `eval/main_loco_parse.py`：导入对话、构造记忆并生成答案。
 - `eval/evalution_loco.py`：当前实现的 F1 和 BLEU-1 评分。
 - `scripts/run_locomo_eval.sh`：提供 `quick`、`full`、`score` 模式。
-
-**已提交的生成脚本仍从 `memoryP.memoryos` 导入，依赖旧目录布局；普通 `pmemo` 克隆下直接运行 `quick`/`full` 可能出现 `ModuleNotFoundError`。** 本文不将本地未发布的导入修复描述为已可用功能。
-
-如需不修改文件试跑，可在根目录用模块别名兼容旧导入。下面限制为一个样本、20 条对话和 20 道问题，并单独保存结果：
-
-```bash
-export LOCOMO_MAX_SAMPLES=1
-export LOCOMO_MAX_DIALOGS_PER_SAMPLE=20
-export LOCOMO_MAX_QAS_PER_SAMPLE=20
-export LOCOMO_OUTPUT_FILE="$PWD/eval/local_loco_results.json"
-uv run python - <<'PY'
-import os
-import runpy
-import sys
-import types
-from pathlib import Path
-
-root = Path.cwd()
-package = types.ModuleType("memoryP")
-package.__path__ = [str(root)]
-sys.modules["memoryP"] = package
-sys.path.insert(0, str(root / "eval"))
-os.chdir(root / "eval")
-runpy.run_path("main_loco_parse.py", run_name="__main__")
-PY
-uv run python eval/evalution_loco.py eval/local_loco_results.json
-```
-
-该兼容命令处理旧包名，不代表已完成端到端评测验证。三个 `LOCOMO_MAX_*` 变量设为 `0` 可取消相应数量限制；`LOCOMO_RUN_TAG` 控制本次生成的存储目录标签。
-
-已有结果可直接评分，无需生成答案：
-
-```bash
-bash scripts/run_locomo_eval.sh score "$PWD/eval/quick_loco_results.json"
-```
-
-结果文件可能来自受限样本和不同配置，不能据此认定完整 LoCoMo 表现。比较实验应记录数据范围、LLM、向量模型、记忆参数和评分实现；本文不宣称已复现上游论文指标。
-
-## 代码导航
-
-```text
-memoryos.py             对外入口、记忆编排与回复生成
-short_term.py           短期问答队列
-mid_term.py             中期会话、页面、热度与压缩
-long_term.py            画像、知识与长期摘要块
-key_term.py             手动/自动关键记忆
-storage_provider.py     ChromaDB 与 JSON 元数据
-updater.py              短期转中期、对话链与滚动窗口
-retriever.py            多路并行召回
-utils.py                LLM、embedding、摘要及分析工具
-prompts.py              提示词模板
-comprehensive_test.py   真实 API 集成测试
-eval/                   LoCoMo 生成与评分
-scripts/                评测辅助脚本
-upgrade_versions/       分阶段实现与修复记录
-```
-
-`main.py` 当前是占位入口。根目录模块可直接导入，无需下载完整上游仓库作为运行时依赖。
-
-## 当前边界
-
-- 这是本地持久化的实验框架，未提供鉴权、HTTP 服务、跨进程写锁或数据库事务协调。并行召回不代表支持同一存储的多进程安全写入。
-- API embedding 客户端为进程级全局变量，不同实例采用不同服务配置时需注意相互覆盖。
-- `memory_events` 是应用内操作记录，不是完整事件溯源或跨层自动回滚系统。`version` 和 `ttl_days` 字段也不代表完整版本管理或自动到期清理已实现。
-- 模型或 API 请求异常时，部分路径返回错误文本或空召回；应用侧应检查返回值与日志。
-- 根目录目前没有独立 LICENSE 文件；上游许可说明见 [MemoryOS](https://github.com/BAI-LAB/MemoryOS)。
